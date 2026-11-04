@@ -96,6 +96,7 @@ def create_app(settings=None, java=None, watson=None, selector=None, predictor=p
                 answer = service.reply(message.text.strip(), conversation, identity, session_id, message.engagement)
         except SessionCapacityError:
             raise HTTPException(503, "O chat está ocupado. Tente novamente em instantes.") from None
+        answer["metadata"]["authenticated"] = identity is not None
         return {"sessionId": session_id, "sucesso": not answer["metadata"].get("unavailable", False),
                 "resposta": answer["reply"], **answer}
 

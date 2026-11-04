@@ -163,7 +163,7 @@ def test_profile_inventory_avatar_and_completed_missions(setup):
 
 
 @pytest.mark.parametrize("text,method,path,label", [
-    ("iniciar missão Economizar água", "POST", "/usuario/7/missoes/1", "Missão iniciada"),
+    ("iniciar missão Reciclar", "POST", "/usuario/7/missoes/5", "Missão iniciada"),
     ("concluir missão Economizar água", "POST", "/usuario/7/missoes/1/concluir", "Missão concluída"),
     ("comprar Óculos", "POST", "/usuario/7/inventario/10", "Acessório comprado"),
     ("equipar Chapéu", "PUT", "/usuario/7/inventario/11/equipar", "Acessório equipado"),
@@ -175,6 +175,8 @@ def test_operations_use_real_java_contract(setup, text, method, path, label):
     assert response.status_code == 200
     assert label in response.json()["reply"]
     assert setup["calls"][-1] == (method, path, None)
+    assert response.json()["metadata"]["data_changed"] is True
+    assert "usuario" in response.json()["metadata"]["refresh"]
 
 
 def test_ambiguous_target_does_not_write(setup):
@@ -254,15 +256,15 @@ def test_model_and_existing_predict_endpoint(setup):
 
 
 def test_watson_context_is_retained_isolated_and_reset(setup):
-    assert send(setup, "oi").json()["reply"] == "Conversa 1"
+    assert send(setup, "o que é sustentabilidade?").json()["reply"] == "Conversa 1"
     assert send(setup, "como vai?").json()["reply"] == "Conversa 2"
-    assert send(setup, "oi", logged=False).json()["reply"] == "Conversa 1"
+    assert send(setup, "o que é sustentabilidade?", logged=False).json()["reply"] == "Conversa 1"
     token = issue_token(Identity(8), setup["settings"])
-    body = setup["client"].post("/chat", json={"texto": "oi", "sessionId": "conversa"},
+    body = setup["client"].post("/chat", json={"texto": "o que é sustentabilidade?", "sessionId": "conversa"},
                                  headers={"Authorization": "Bearer " + token}).json()
     assert body["reply"] == "Conversa 1"
     send(setup, "reiniciar conversa")
-    assert send(setup, "oi").json()["reply"] == "Conversa 1"
+    assert send(setup, "o que é sustentabilidade?").json()["reply"] == "Conversa 1"
 
 
 def test_watson_intent_routes_to_java(setup):
@@ -272,7 +274,7 @@ def test_watson_intent_routes_to_java(setup):
 
 def test_watson_outage_is_friendly_and_does_not_block_catalog(setup):
     setup["watson"].fail = True
-    assert send(setup, "bom dia").json()["sucesso"] is False
+    assert send(setup, "o que é sustentabilidade?").json()["sucesso"] is False
     assert send(setup, "loja").json()["sucesso"] is True
 
 
@@ -360,3 +362,82 @@ def test_watson_adapter_returns_previous_context_to_sdk():
         return Response()
     client.assistant.send = send
     assert client.message("oi", {"turn": 1}, "usuario:7")["context"]["turn"] == 2
+
+
+def test_greetings_and_menu_follow_verified_login(setup):
+    anonymous = send(setup, "Oi", logged=False).json()
+    assert anonymous["metadata"]["authenticated"] is False
+    assert "entre na sua conta" in anonymous["reply"].lower()
+    logged = send(setup, "Olá").json()
+    assert logged["metadata"]["authenticated"] is True
+    assert "Pessoa" in logged["reply"] and "conta está conectada" in logged["reply"]
+    assert setup["watson"].calls == [] and setup["calls"] == []
+
+
+def test_claiming_to_be_logged_in_does_not_end_conversation_or_grant_access(setup):
+    anonymous = send(setup, "Mas eu to logada", logged=False).json()
+    assert anonymous["metadata"]["auth_required"] is True
+    assert anonymous["metadata"]["login_url"] == "/login"
+    assert "não recebeu um login válido" in anonymous["reply"]
+    logged = send(setup, "Mas eu to logada").json()
+    assert "conta está conectada" in logged["reply"]
+    assert setup["watson"].calls == [] and setup["calls"] == []
+
+
+@pytest.mark.parametrize("logged", [True, False])
+def test_rewards_are_explained_without_incorrect_registration_prompt(setup, logged):
+    body = send(setup, "Recompensas", logged=logged).json()
+    assert "moedas" in body["reply"] and "acessórios" in body["reply"]
+    assert "cadastro" not in body["reply"].lower()
+    assert body["metadata"]["data_changed"] is False
+    assert setup["watson"].calls == [] and setup["calls"] == []
+
+
+def test_mission_catalog_is_personalized_and_read_only(setup):
+    body = send(setup, "missões").json()
+    assert "Pedalar" not in body["reply"]
+    assert "Jardim" not in body["reply"] and "Antiga" not in body["reply"]
+    assert "Economizar água" in body["reply"] and "Status: em andamento" in body["reply"]
+    assert "iniciar missão Reciclar" in body["reply"]
+    assert "iniciar missão Economizar água" not in body["reply"]
+    assert body["metadata"]["data_changed"] is False
+    assert setup["calls"] == [("GET", "/missao/ativas", None), ("GET", "/usuario/7/missoes", None)]
+
+
+def test_anonymous_catalog_explains_that_progress_is_not_known(setup):
+    body = send(setup, "missões", logged=False).json()
+    assert "catálogo" in body["reply"] and "não verifica seu progresso" in body["reply"]
+    assert "iniciar missão" not in body["reply"]
+    assert body["metadata"]["data_changed"] is False
+    assert setup["calls"] == [("GET", "/missao/ativas", None)]
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("iniciar missão Pedalar", "já concluiu"),
+    ("concluir missão Pedalar", "já concluiu"),
+    ("iniciar missão Economizar água", "já está em andamento"),
+    ("concluir missão Reciclar", "ainda não iniciou"),
+])
+def test_existing_mission_state_prevents_duplicate_or_premature_writes(setup, command, expected):
+    body = send(setup, command).json()
+    assert expected in body["reply"]
+    assert body["metadata"]["data_changed"] is False
+    assert all(method == "GET" for method, _, _ in setup["calls"])
+
+
+def test_completed_or_unverifiable_progress_is_not_recommended_as_new(setup):
+    setup["progress"][:] = [{"idMissao": v["idMissao"], "missaoConcluida": "S"} for v in setup["missions"]]
+    body = send(setup, "missões").json()
+    assert "já concluiu todas" in body["reply"]
+    setup["progress"][0]["missaoConcluida"] = None
+    body = send(setup, "missões").json()
+    assert body["sucesso"] is False and "iniciar missão" not in body["reply"]
+    assert all(method == "GET" for method, _, _ in setup["calls"])
+
+
+def test_recommendation_does_not_restart_pending_mission(setup):
+    body = send(setup, "quais missões preciso para conseguir Óculos?").json()
+    assert "já iniciou a primeira missão" in body["reply"]
+    assert "iniciar missão Economizar água" not in body["reply"]
+    assert body["metadata"]["data_changed"] is False
+    assert all(method == "GET" for method, _, _ in setup["calls"])

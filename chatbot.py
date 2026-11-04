@@ -6,12 +6,19 @@ substituida pelo login real da API Java; o ID vem exclusivamente do token.
 
 import re
 import unicodedata
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
 from auth import Identity
 from clients import ServiceError
 from engagement import DadosUsuario, predict_engagement
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    text: str
+    refresh: tuple[str, ...]
 
 
 def normalize(value):
@@ -65,6 +72,22 @@ class ChatService:
     def __init__(self, java, watson, selector, predictor=predict_engagement):
         self.java, self.watson, self.selector, self.predictor = java, watson, selector, predictor
 
+    def menu(self, identity):
+        if identity:
+            name = f", {identity.name}" if identity.name else ""
+            return self.answer(
+                f"Olá{name}! Sua conta está conectada ao chat.\n\n"
+                "Você pode pedir:\n• Minhas missões\n• Meu saldo\n• Meu foguinho\n"
+                "• Meu inventário\n• Meu avatar\n• Loja\n• Uma dica sustentável\n\n"
+                "Também posso ajudar a escolher missões para conseguir um acessório.", action="menu"
+            )
+        return self.answer(
+            "Olá! Sou a SoulIA. Você pode conversar sobre sustentabilidade, pedir uma dica, "
+            "ver as missões disponíveis ou consultar a loja.\n\n"
+            "Para consultar seu saldo, foguinho, avatar, inventário e missões pessoais, "
+            "entre na sua conta no site. Não envie sua senha pelo chat.", action="menu", login_url="/login"
+        )
+
     def reply(self, raw, session, identity: Identity | None, session_id, engagement=None):
         text = normalize(raw)
         if not text:
@@ -74,26 +97,36 @@ class ChatService:
             if text != "/start":
                 return self.answer("Conversa reiniciada. Seu login no site continua ativo." if identity
                                    else "Conversa reiniciada. Digite menu para ver os comandos.")
-        if text in {"/start", "menu", "ajuda"}:
-            return self.answer(
-                "Olá! Sou a SoulIA. Você pode pedir missões, loja, inventário, avatar ou saldo.\n"
-                "Entre na sua conta no site para consultar seus dados.\n"
-                "Experimente: “iniciar missão Economizar água”, “comprar Óculos” ou "
-                "“quais missões preciso para conseguir Óculos?”."
-            )
+        greeting = re.sub(r"[!?.,]", "", text).strip()
+        if greeting in {"/start", "menu", "ajuda", "oi", "ola", "bom dia", "boa tarde", "boa noite",
+                        "oi tudo bem", "ola tudo bem"}:
+            return self.menu(identity)
         # Credenciais nunca devem ser enviadas ao Watson ou ao interpretador opcional.
         if re.search(r"[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}", raw) or re.search(
             r"\b(?:senha|password|apikey|api_key)\b", text
         ):
             return self.answer("Use o login do site para identificar sua conta. Não envie sua senha pelo chat.")
+        if re.search(r"\b(?:logad[ao]|login|autenticad[ao])\b", text):
+            if identity:
+                return self.answer("Sua conta está conectada ao chat. Pode pedir seu saldo, foguinho, "
+                                   "inventário ou missões pessoais.", action="login_status")
+            return self.answer("O chat ainda não recebeu um login válido da sua conta. Entre novamente "
+                               "pelo site para conectar o chat. Você pode continuar conversando sobre "
+                               "sustentabilidade e consultar a loja e as missões disponíveis.",
+                               action="login_status", auth_required=True, login_url="/login")
         if "engajamento" in text:
             return self.engagement(engagement)
         action = "recomendacao" if is_goal(text) else classify(text)
         watson_metadata = {}
         if not action:
-            if re.search(r"cadastr|recompensa|registrar.*acao", text):
-                return self.answer("Use o cadastro da plataforma para criar sua conta. As recompensas "
-                                   "disponíveis aqui são as moedas das missões e os acessórios da loja.")
+            if "recompensa" in text:
+                return self.answer("As recompensas disponíveis são as moedas ganhas nas missões e os "
+                                   "acessórios da loja. Peça “loja” para ver os itens ou “meu saldo” para "
+                                   "consultar suas moedas." + (" Entre na sua conta para consultar seu saldo."
+                                   if identity is None else ""), action="recompensas")
+            if re.search(r"cadastr|registrar.*acao", text):
+                return self.answer("Use o cadastro da plataforma para criar sua conta. Você pode "
+                                   "continuar conversando sobre sustentabilidade e consultar missões e loja.")
             try:
                 result = self.watson.message(
                     raw, session.context,
@@ -107,6 +140,8 @@ class ChatService:
             output = result.get("output") or {}
             intents = output.get("intents") or result.get("intents") or []
             intent = str(intents[0].get("intent", "")) if intents else ""
+            if intent == "menu_principal":
+                return self.menu(identity)
             action = classify(text, intent)
             watson_metadata = {"intent": intent} if intent else {}
             if not action:
@@ -120,7 +155,7 @@ class ChatService:
                                    "Digite menu para ver os comandos.", source="watson", **watson_metadata)
         if action not in {"loja", "missoes"} and identity is None:
             return self.answer("Entre na sua conta no site para eu consultar seus dados e realizar esse pedido.",
-                               action=action, auth_required=True)
+                               action=action, auth_required=True, login_url="/login")
         if action in {"iniciar", "concluir", "comprar", "equipar", "desequipar"} and re.search(
             r"\b(?:nao|nunca|evite)\b|\bcomo\b|\bo que acontece\b", text
         ):
@@ -131,6 +166,9 @@ class ChatService:
                 answer = self.recommend(raw, identity.user_id)
             else:
                 answer = self.execute(action, raw, text, identity.user_id if identity else None)
+            if isinstance(answer, ActionResult):
+                return self.answer(answer.text, source="java", action=action,
+                                   data_changed=True, refresh=list(answer.refresh), **watson_metadata)
             return self.answer(answer, source="java", action=action, **watson_metadata)
         except ServiceError as error:
             reason = {
@@ -145,7 +183,8 @@ class ChatService:
 
     @staticmethod
     def answer(reply, source="local", **metadata):
-        return {"reply": reply, "text": reply, "metadata": {"source": source, **metadata}, "variables": {}}
+        return {"reply": reply, "text": reply,
+                "metadata": {"source": source, "data_changed": False, **metadata}, "variables": {}}
 
     def execute(self, action, raw, text, user_id):
         if action == "loja":
@@ -157,12 +196,7 @@ class ChatService:
             ) + "\n\nVocê pode dizer “comprar” e o nome do acessório." if items
                     else "A loja não tem acessórios disponíveis no momento.")
         if action == "missoes":
-            items = [v for v in self.java.get_list("/missao/ativas") if yes(v.get("ativo"))]
-            return ("🌱 Escolha sua próxima missão\n\n" + "\n\n".join(
-                f"🌿 {shown(v.get('tituloMissao'))}\n{shown(v.get('descricaoMissao'))}\n"
-                f"🪙 Recompensa: {money(v.get('valorMoedasMissao'))}" for v in items
-            ) + f"\n\nQual delas você quer iniciar? Escreva “iniciar missão {items[0].get('tituloMissao')}”."
-                    if items else "No momento, não há missões ativas disponíveis.")
+            return self.available_missions(user_id)
         if action == "perfil":
             user = self.java.get_object(f"/usuario/{user_id}")
             if user.get("idUsuario") != user_id:
@@ -181,6 +215,42 @@ class ChatService:
         if action in {"inventario", "minhas"}:
             return self.records(action, text, user_id)
         return self.operate(action, raw, user_id)
+
+    def available_missions(self, user_id):
+        items = [v for v in self.java.get_list("/missao/ativas") if yes(v.get("ativo"))
+                 and not re.search(r"encerrad[ao]", normalize(v.get("descricaoMissao")))]
+        if not items:
+            return "No momento, não há missões ativas disponíveis."
+        progress = self.mission_progress(user_id) if user_id else []
+        completed = {v["idMissao"] for v in progress
+                     if integer(v.get("idMissao")) and yes(v.get("missaoConcluida"))}
+        assigned = {v["idMissao"] for v in progress if integer(v.get("idMissao"))}
+        items = [v for v in items if v.get("idMissao") not in completed]
+        if not items:
+            return "Você já concluiu todas as missões ativas disponíveis. Peça “minhas missões concluídas” " \
+                "para consultar seu histórico ou aguarde novas missões."
+        lines = []
+        for mission in items:
+            state = "\nStatus: em andamento" if mission.get("idMissao") in assigned else ""
+            lines.append(f"🌿 {shown(mission.get('tituloMissao'))}\n{shown(mission.get('descricaoMissao'))}"
+                         f"\n🪙 Recompensa: {money(mission.get('valorMoedasMissao'))}" + state)
+        if not user_id:
+            return "🌱 Missões disponíveis no catálogo\n\n" + "\n\n".join(lines) + \
+                "\n\nEntre na sua conta para conferir quais você já iniciou ou concluiu. " \
+                "Esta consulta pública não verifica seu progresso e não inicia missões."
+        new = next((v for v in items if v.get("idMissao") not in assigned), None)
+        next_step = (f"Para iniciar uma nova missão, diga “iniciar missão {new.get('tituloMissao')}”." if new else
+                     "Você já iniciou essas missões. Peça “minhas missões pendentes” para acompanhar seu progresso.")
+        return "🌱 Missões que você ainda não concluiu\n\n" + "\n\n".join(lines) + "\n\n" + next_step
+
+    def mission_progress(self, user_id):
+        progress = self.java.get_list(f"/usuario/{user_id}/missoes")
+        for record in progress:
+            state = record.get("missaoConcluida")
+            if (not integer(record.get("idMissao")) or record["idMissao"] <= 0
+                    or str(state).lower() not in {"s", "n", "sim", "nao", "não", "true", "false", "1", "0"}):
+                raise ServiceError("java")
+        return progress
 
     def records(self, action, text, user_id):
         inventory = action == "inventario"
@@ -242,6 +312,15 @@ class ChatService:
         target_id = target.get(id_key)
         if not integer(target_id) or target_id <= 0:
             raise ServiceError("java")
+        if mission:
+            progress = self.mission_progress(user_id)
+            record = next((v for v in progress if v.get("idMissao") == target_id), None)
+            if record is not None and yes(record.get("missaoConcluida")):
+                return f"Você já concluiu a missão “{target[name_key]}”. Não é necessário iniciá-la ou concluí-la novamente."
+            if action == "iniciar" and record is not None:
+                return f"A missão “{target[name_key]}” já está em andamento. Peça “minhas missões pendentes” para acompanhá-la."
+            if action == "concluir" and record is None:
+                return f"Você ainda não iniciou a missão “{target[name_key]}”. Diga “iniciar missão {target[name_key]}” primeiro."
         path = f"/usuario/{user_id}/" + ("missoes/" if mission else "inventario/") + str(target_id)
         suffix = {"concluir": "/concluir", "equipar": "/equipar", "desequipar": "/desequipar"}.get(action, "")
         result = self.java.request("PUT" if action in {"equipar", "desequipar"} else "POST", path + suffix)
@@ -256,9 +335,10 @@ class ChatService:
             raise ServiceError("java")
         labels = {"iniciar": "Missão iniciada", "concluir": "Missão concluída", "comprar": "Acessório comprado",
                   "equipar": "Acessório equipado", "desequipar": "Acessório desequipado"}
-        return f"{labels[action]}: {target[name_key]}." + (
+        reply = f"{labels[action]}: {target[name_key]}." + (
             f"\nRecompensa registrada: {money(result['moedasGanhasMissao'])}."
             if action == "concluir" and result.get("moedasGanhasMissao") is not None else "")
+        return ActionResult(reply, ("usuario", "missoes") if mission else ("usuario", "inventario", "avatar"))
 
     def recommend(self, raw, user_id):
         catalog = self.java.get_list("/acessorio")
@@ -272,7 +352,7 @@ class ChatService:
         item = catalog[index]
         user = self.java.get_object(f"/usuario/{user_id}")
         missions = self.java.get_list("/missao/ativas")
-        progress = self.java.get_list(f"/usuario/{user_id}/missoes")
+        progress = self.mission_progress(user_id)
         inventory = self.java.get_list(f"/usuario/{user_id}/inventario")
         price, balance = item.get("preco"), user.get("saldoMoedas")
         if user.get("idUsuario") != user_id or not integer(price) or not integer(balance):
@@ -307,9 +387,12 @@ class ChatService:
         end = (f"Ao concluir essas missões, você poderá somar {earned} moedas e chegar a {balance + earned} moedas — "
                "suficiente para esse item." if earned >= gap else f"Essas missões somam {earned} moedas. "
                f"Depois delas ainda faltarão {gap - earned} moedas; será necessário aguardar outras missões.")
+        already_started = any(v.get("idMissao") == chosen[0].get("idMissao") for v in progress)
+        next_step = ("Você já iniciou a primeira missão sugerida. Peça “minhas missões pendentes” para acompanhar "
+                     "seu progresso." if already_started else f"Para começar, diga “iniciar missão {chosen[0].get('tituloMissao')}”.")
         return head + f"\nFaltam {gap} moedas.\n\nEstas missões podem ajudar:\n\n" + lines + "\n\n" + end + \
             "\n\nConsiderei apenas missões que você ainda não concluiu. As moedas dependem da conclusão e da " \
-            f"confirmação na plataforma.\nPara começar, diga “iniciar missão {chosen[0].get('tituloMissao')}”."
+            "confirmação na plataforma.\n" + next_step
 
     def engagement(self, data):
         if data is None:
