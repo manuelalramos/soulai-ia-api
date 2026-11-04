@@ -203,10 +203,18 @@ class ChatService:
                 raise ServiceError("java")
             if re.search(r"saldo|quantas moedas|quanto.*moedas", text):
                 return f"Seu saldo atual é {money(user.get('saldoMoedas'))}."
+            # Cada missão concluída soma 20, incluindo as que já saíram do catálogo.
+            completed = sum(1 for record in self.mission_progress(user_id)
+                            if yes(record.get("missaoConcluida")))
+            total_energy = completed * 20
+            level, energy = divmod(total_energy, 100)
             if re.search(r"ofensiva|foguinho", text):
-                return f"Seu nível de ofensiva é {shown(user.get('nivelOfensiva'))}."
+                return (f"Seu nível de ofensiva é {level}.\n"
+                        f"Energia para o próximo nível: {energy}%.\n"
+                        f"Energia acumulada: {total_energy}.\n"
+                        "Cada missão concluída soma 20 de energia; a cada 100, você sobe um nível.")
             return (f"Seu perfil\n\nNome: {shown(user.get('nome'))}\nSaldo: {money(user.get('saldoMoedas'))}"
-                    f"\nNível de ofensiva: {shown(user.get('nivelOfensiva'))}")
+                    f"\nNível de ofensiva: {level}")
         if action == "avatar":
             avatar = self.java.get_object(f"/avatar/usuario/{user_id}")
             return (f"Seu avatar se chama {shown(avatar.get('nome'))}.\n\nPeça para ver seu inventário "

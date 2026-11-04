@@ -162,6 +162,37 @@ def test_profile_inventory_avatar_and_completed_missions(setup):
     assert "Pedalar" in reply and "Economizar água" not in reply
 
 
+@pytest.mark.parametrize("completed,level,energy,total", [
+    (0, 0, 0, 0),
+    (1, 0, 20, 20),
+    (4, 0, 80, 80),
+    (5, 1, 0, 100),
+    (6, 1, 20, 120),
+    (10, 2, 0, 200),
+])
+def test_fire_progress_uses_completed_history(setup, completed, level, energy, total):
+    setup["progress"][:] = [
+        {"idUsuario": 7, "idMissao": 100 + index, "missaoConcluida": "S"}
+        for index in range(completed)
+    ] + [{"idUsuario": 7, "idMissao": 999, "missaoConcluida": "N"}]
+    body = send(setup, "meu foguinho").json()
+    assert f"nível de ofensiva é {level}." in body["reply"]
+    assert f"próximo nível: {energy}%." in body["reply"]
+    assert f"Energia acumulada: {total}." in body["reply"]
+    assert body["metadata"]["data_changed"] is False
+    assert all(method == "GET" for method, _, _ in setup["calls"])
+
+
+def test_new_mission_does_not_reduce_fire_energy(setup):
+    before = send(setup, "meu foguinho").json()["reply"]
+    setup["missions"].append({"idMissao": 500, "tituloMissao": "Nova", "ativo": "S"})
+    assert send(setup, "meu foguinho").json()["reply"] == before
+
+
+def test_profile_uses_the_same_calculated_level(setup):
+    assert "Nível de ofensiva: 0" in send(setup, "meu perfil").json()["reply"]
+
+
 @pytest.mark.parametrize("text,method,path,label", [
     ("iniciar missão Reciclar", "POST", "/usuario/7/missoes/5", "Missão iniciada"),
     ("concluir missão Economizar água", "POST", "/usuario/7/missoes/1/concluir", "Missão concluída"),
