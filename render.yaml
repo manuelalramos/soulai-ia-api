@@ -18,4 +18,4 @@ services:
       - key: SOULIA_AUTH_SECRET
         generateValue: true
       - key: SOULIA_CORS_ORIGINS
-        value: https://soul-ai-projeto.vercel.app
+        value: https://soul-ai-projeto.vercel.app,http://localhost:5173

@@ -35,7 +35,7 @@ class Settings:
             max_sessions=max(1, int(os.getenv("SOULIA_MAX_SESSIONS", "1000"))),
             request_timeout=max(1, float(os.getenv("SOULIA_HTTP_TIMEOUT_SECONDS", "30"))),
             cors_origins=tuple(v.strip().rstrip("/") for v in os.getenv(
-                "SOULIA_CORS_ORIGINS", "https://soul-ai-projeto.vercel.app,http://localhost:3000,http://localhost:5173"
+                "SOULIA_CORS_ORIGINS", "https://soul-ai-projeto.vercel.app,http://localhost:5173"
             ).split(",") if v.strip()),
             llm_url=os.getenv("SOULIA_LLM_URL", "").strip(),
             llm_model=os.getenv("SOULIA_LLM_MODEL", "").strip(),
