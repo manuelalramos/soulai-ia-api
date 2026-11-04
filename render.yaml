@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: soulai-ia-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    envVars:
+      - key: WATSON_APIKEY
+        sync: false
+      - key: WATSON_URL
+        value: https://api.us-east.assistant.watson.cloud.ibm.com/instances/0a8c19ca-2423-4346-930b-d223ef220f89
+      - key: WATSON_ASSISTANT_ID
+        value: f949a92b-97fd-4851-8217-3f603de2c29f
+      - key: SOULIA_JAVA_URL
+        value: https://soulai-api.onrender.com
+      - key: SOULIA_AUTH_SECRET
+        generateValue: true
+      - key: SOULIA_CORS_ORIGINS
+        value: https://soul-ai-projeto.vercel.app
